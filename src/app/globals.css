@@ -1,0 +1,53 @@
+@import "tailwindcss";
+
+/*
+ * 26.2 FM is a dark, screen-on app you glance at mid-run, so it commits to a
+ * single dark look rather than tracking the system theme.
+ * --accent is swapped by Wall Mode (see .wall-mode below).
+ */
+:root {
+  --background: #08090c;
+  --foreground: #f2f3f5;
+  --muted: #8b8f98;
+  --accent: #4ade80;
+  --accent-dim: #14532d;
+}
+
+/* Wall Mode: miles 18-20. Visual state only - it never changes what plays. */
+.wall-mode {
+  --accent: #f97316;
+  --accent-dim: #7c2d12;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-dim: var(--accent-dim);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+  /* The accent transition carries the Wall Mode shift across the whole page. */
+  transition: background-color 600ms ease;
+}
+
+/* Tabular numerals keep the race clock from jittering as digits change. */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
