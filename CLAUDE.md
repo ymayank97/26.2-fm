@@ -6,63 +6,69 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-**26.2 FM — "The soundtrack to the long run."** A client-side Next.js app that plays a marathon soundtrack through YouTube IFrame embeds. Music is split into 6 mile-range "chapters"; Run Mode derives your current mile from target pace + elapsed time and auto-selects the matching chapter. No backend, no API key, no database.
+**26.2 FM — "The soundtrack to the long run."** A deliberately minimal, single-screen Next.js app that plays one YouTube playlist as audio over an ambient background. No backend, no database, no API key.
 
-Stack: Next.js 16 (App Router, `src/`), React 19, Tailwind v4, TypeScript, Vitest. Deploys to Vercel from the repo root.
+Stack: Next.js 16 (App Router, `src/`), React 19, Tailwind v4, TypeScript, Vitest, Playwright. Deploys to Vercel from the repo root.
+
+**Scope discipline matters here.** An earlier version had six mile-range "chapters," pace math, a race clock, and localStorage persistence. All of it was deliberately removed — no categorization, no time fields. If you're about to add a feature with state that outlives a page load, that's a signal to stop and ask.
 
 ## Commands
 
 ```bash
 npm run dev            # dev server on :3000
 npm run build          # production build (also typechecks)
-npm run lint           # eslint (flat config, react-hooks rules are strict — see below)
-npm run test           # vitest unit tests, single run
-npm run test:watch     # vitest watch
-npm run e2e            # playwright end-to-end (starts/reuses the dev server)
+npm run lint           # eslint (React 19 hooks rules are strict — see below)
+npm run test           # vitest unit tests
+npm run e2e            # playwright (starts/reuses the dev server)
 npx tsc --noEmit       # typecheck alone
 
 # single tests
-npx vitest run -t "getChapterForMile"
-npx playwright test -g "Wall Mode"
+npx vitest run -t "extractPlaylistId"
+npx playwright test -g "phone viewport"
 ```
-
-`npm run build` is the only typecheck in CI terms — `next build` runs TypeScript. Lint, unit, and e2e are separate gates.
 
 ## Architecture
 
-Data flows in one direction: **elapsed time → mile → chapter → track → videoId → player.**
+Four components and one lib module. The whole data flow is: a playlist ID → a hidden YouTube iframe → track metadata back out.
 
-- `src/data/chapters.ts` — the 6 chapters and their mile ranges. Single source of truth for course structure.
-- `src/lib/pace.ts` — all time/mile/chapter math, pure and fully unit-tested. Put new race logic here, not in components.
-- `src/hooks/useRunTimer.ts` — the race clock state machine (`idle → running → paused → finished`).
-- `src/app/page.tsx` — the only stateful orchestrator. Owns target time, chapter/track selection, and playback state; every component under it is presentational.
-- `src/components/YouTubePlayer.tsx` — the sole `react-youtube` boundary.
-- `src/lib/storage.ts` — localStorage, namespaced `fm262:`.
-- `e2e/run-mode.spec.ts` — asserts an *invariant* rather than racing the clock: at every sampled instant the chapter and Wall Mode on screen must match what `pace.ts` says for the mile shown at that same instant. Keep new run-mode assertions in that style; timestamp-based waits go flaky. The `data-mile` / `data-wall` / `data-status` attributes on `[data-testid="app-root"]` exist for this.
+- `src/lib/playlist.ts` — the playlist ID, and URL/ID parsing. **The one place to paste a playlist.**
+- `src/components/YouTubePlayer.tsx` — the sole `react-youtube` boundary. Hidden; exposes `next`/`prev` via an imperative handle.
+- `src/components/BackgroundVideo.tsx` — ambient gradient, with an optional video layered over it.
+- `src/components/NowPlaying.tsx`, `PlayButton.tsx` — presentational.
+- `src/app/page.tsx` — owns `playing`, `track`, and `error`. That's the entire app state.
+
+## Configuration
+
+Both are optional and read at **build time** (`NEXT_PUBLIC_*` is inlined, so they must stay static references, and changing them in Vercel requires a redeploy).
+
+| Variable | Effect |
+|---|---|
+| `NEXT_PUBLIC_YT_PLAYLIST_ID` | Playlist to play. Overrides `PLAYLIST_SOURCE` in `playlist.ts`. |
+| `NEXT_PUBLIC_BACKGROUND_VIDEO` | e.g. `/background.mp4`. Unset → ambient gradient only. |
+
+The playlist must be **public or unlisted**. Private playlists and some auto-generated YouTube Music mixes cannot be embedded at all.
 
 ## Constraints that will bite you
 
-These are load-bearing. Changing them reintroduces bugs that were already fixed once.
+- **Never invent a playlist or video ID.** With none configured the app shows a setup notice, and that state is covered by tests — keep it working.
+- **`isLikelyPlaylistId` enforces a length floor on purpose.** A truncated ID like `PLTJ1PnzCWyFw` (13 chars; real ones are `PL` + 16 or 32) otherwise fails silently inside the player with no useful error. Don't loosen it without a reason.
+- **`opts` must be memoised.** react-youtube tears down and rebuilds the iframe whenever `opts` changes identity, which restarts playback on every render.
+- **`getVideoData()` is undocumented.** It's how now-playing text works without an API key. Treat it as best-effort: if it returns nothing, render nothing — never throw.
+- **`onError` must advance the queue.** A removed or embedding-disabled track inside a playlist would otherwise stall it permanently.
+- **`youtube-player` ships no TypeScript types** (Flow only), so react-youtube's player type is effectively `any`. `PlaylistPlayer` in `YouTubePlayer.tsx` declares the handful of methods actually used — add to it rather than casting inline.
+- ESLint runs React 19's `react-hooks/refs` and `set-state-in-effect`. Reading `ref.current` during render is an error; derive during render or use `useMemo`.
 
-- **`getChapterForMile` must never return `undefined`.** The obvious `chapters.find(c => mile >= c.startMile && mile < c.endMile)` returns undefined at exactly 26.2, because the last chapter's end is exclusive. Clamp first; the finish belongs to the last chapter.
-- **Never divide by an unvalidated target time.** `targetMinutes / 26.2` yields `Infinity`/`NaN` for a zero or unparsed target. `paceMinPerMile` returns `null` outside 90–480 minutes; handle the null.
-- **Elapsed time is always a `Date.now()` delta, never a per-tick accumulator.** `setInterval` drifts by seconds per minute in a backgrounded tab, which over 4 hours puts the mile counter minutes off. The interval only triggers re-renders.
-- **localStorage and `window.location` are read only inside the mount effect in `page.tsx`.** Reading either during render makes server and client markup disagree → hydration mismatch. That effect carries a scoped `eslint-disable` explaining exactly this.
-- **The YouTube player must stay visible and ≥200×200.** YouTube's IFrame API terms require it, so a hidden or 1px player is not an option. The wrapper is a responsive 16:9 frame capped at 480×270.
-- **`PLAYER_OPTS` is module-scope on purpose.** react-youtube rebuilds the iframe when `opts` changes identity, so an inline object restarts playback on every render.
-- **`onError` must always advance.** User-supplied IDs include removed and embed-disabled videos; without the skip the app dead-ends silently. `errorStreakRef` stops the skip loop when every ID in a chapter is bad.
-- ESLint runs React 19's `react-hooks/set-state-in-effect`. Prefer deriving values during render over `setState` in an effect — that is why `finished` is computed, not stored.
+## The hidden player
 
-## Track data
+The iframe is mounted at a real 480×270 and hidden via `.player-hidden` (`opacity: 0`, behind the background), keeping audio only. This is a deliberate product decision by the repo owner.
 
-**Do not invent YouTube video IDs, track titles, or artists.** All 6 chapters ship with `tracks: []` and every screen is built to render correctly with zero tracks. Real values get pasted in by the repo owner.
+Two things to keep in view rather than re-litigate:
 
-Likewise, the landing copy `THE SPOKANE MARATHON` / `10.11.26` is given verbatim — don't add or alter event details.
+- It's a **contract** question, not a copyright one. YouTube serves the audio, so there's no hosting/redistribution issue — but YouTube's API Services Terms govern player use regardless, specifying a minimum player size and prohibiting separating audio from video. The realistic downside is the embed being blocked, not a copyright claim.
+- A **zero-size** iframe is the shape most likely to have playback refused outright, which is why it's 480×270 and hidden with CSS rather than sized to 1px. Don't "optimise" that down.
 
-## Dev aid
+Mobile browsers also pause the iframe when the tab is backgrounded or the screen locks, and autoplay needs a user gesture, so the first play must be a tap. Both are inherent to embeds.
 
-`?speed=N` (1–500) multiplies elapsed time so a 4-hour run replays in minutes: `localhost:3000/?speed=60`. Chapters should switch at miles 5 / 10 / 15 / 20 / 23, Wall Mode engages 18–20, and the run finishes at 26.2.
+## Testing
 
-## Known limitations of the embed approach
-
-Mobile browsers pause a YouTube iframe when the tab is backgrounded or the screen locks, so V1 is a screen-on app rather than a phone-in-pocket player. Autoplay also requires a user gesture, so the first play must be a tap. Both are inherent to embeds; escaping them means native or a licensed audio SDK.
+`e2e/player.spec.ts` covers the unconfigured shell — the state that ships until a playlist is pasted in. Real playback can't be asserted without a live public playlist and network access; verify that by hand after setting one.
